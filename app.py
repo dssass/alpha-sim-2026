@@ -16,7 +16,8 @@ st.set_page_config(page_title="Alpha-Sim: 2026 AI 戰情室", layout="wide", pag
 st.markdown("""
     <style>
     .stButton>button {width: 100%; border-radius: 8px; height: 3.5em; font-weight: bold; font-size: 1.2em;}
-    .report-box {background-color: #f0f2f6; border-left: 6px solid #ff4b4b; padding: 20px; border-radius: 10px; margin-bottom: 20px;}
+    .report-box {background-color: #1e1e1e; border-left: 6px solid #ff4b4b; padding: 20px; border-radius: 10px; margin-bottom: 20px;}
+    .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 8px; text-align: center;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -42,44 +43,32 @@ with st.sidebar:
 
 @st.cache_data(ttl=3600)
 def get_market_data(ticker):
-    """
-    抓取並清洗歷史數據 
-    (修復版: 改用 Ticker.history 增強雲端環境穩定性)
-    """
+    """抓取並清洗歷史數據"""
     try:
-        # 方法 1: 使用 Ticker 物件 (通常在 Streamlit Cloud 較穩定)
         stock = yf.Ticker(ticker)
         data = stock.history(period="2y")
         
-        # 如果方法 1 失敗 (空的)，嘗試方法 2: 一般下載
         if data.empty:
             data = yf.download(ticker, period="2y", interval="1d", progress=False)
         
         if data.empty:
             return None
         
-        # --- 資料清洗與防呆 ---
-        
-        # 1. 處理 MultiIndex (移除多餘層級，yfinance 常見坑)
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
             
-        # 2. 移除時區資訊 (Plotly 繪圖時如果有时区會報錯)
         if data.index.tz is not None:
             data.index = data.index.tz_localize(None)
 
-        # 3. 確保有 Close 欄位
         if 'Close' not in data.columns:
             if 'Adj Close' in data.columns:
                 data['Close'] = data['Adj Close']
             else:
-                return None # 資料結構嚴重錯誤
+                return None
                 
-        # 簡單補值
         return data.ffill()
         
     except Exception as e:
-        # 在開發模式下可以 print(e) 來看錯誤，但這裡回傳 None 讓主程式處理
         return None
 
 def get_perplexity_intel(ticker, api_key):
@@ -93,7 +82,7 @@ def get_perplexity_intel(ticker, api_key):
     Focus on:
     1. Revenue/Earnings outlook for 2026.
     2. Key themes (e.g., AI Server, iPhone, EV).
-    3. Institutional sentiment.
+    3. Institutional sentiment (Target prices).
     Keep it concise.
     """
     try:
@@ -107,7 +96,6 @@ def get_perplexity_intel(ticker, api_key):
         return f"Perplexity Error: {str(e)}"
 
 def clean_json_string(json_str):
-    """🛠️ 關鍵修復：移除 Markdown 標記，防止 JSON 解析失敗"""
     try:
         cleaned = re.sub(r"```json\s*", "", json_str, flags=re.IGNORECASE)
         cleaned = re.sub(r"```", "", cleaned)
@@ -116,33 +104,39 @@ def clean_json_string(json_str):
         return json_str
 
 def get_gemini_decision(ticker, api_key, intel_text):
-    """引擎 B: 決策與參數設定"""
+    """引擎 B: 決策與參數設定 (2026 未來版)"""
     if not api_key: return None
     
     genai.configure(api_key=api_key)
     
+    # 🔥 強制 AI 給出明確數字，避免死魚線
     prompt = f"""
-    You are a Quantitative Portfolio Manager in 2026. Target: {ticker}
+    You are an aggressive Quantitative Portfolio Manager in 2026. Target: {ticker}
     Intel: {intel_text}
     
     Task:
-    Determine 'Expected Annual Return' (drift) and 'Volatility Multiplier' based on the intel.
+    Determine 'Expected Annual Return' (drift) and 'Volatility Multiplier'.
+    
+    CRITICAL RULES:
+    1. If Verdict is BUY, 'expected_return' MUST be significant (e.g., > 0.20 for 20% annual).
+    2. If Verdict is SELL, 'expected_return' MUST be negative (e.g., -0.15).
+    3. 'volatility_multiplier': If the stock is an AI/Tech stock, this should be > 1.2.
     
     Output JSON ONLY:
     {{
         "verdict": "BUY/SELL/HOLD",
         "reasoning": "Short summary...",
-        "expected_return": 0.15,
-        "volatility_multiplier": 1.1
+        "expected_return": 0.25,
+        "volatility_multiplier": 1.2
     }}
     """
     
-    # ✅ 嚴格鎖定模型清單 (2026 配置)
+    # 🔥 2026 年頂規模型清單 (依照你的指示)
     models = [
-        "gemini-3-flash-preview",       
-        "gemini-2.5-flash-preview",     
-        "gemini-flash-latest",          
-        "gemini-2.0-flash"              
+        "gemini-3-flash-preview",       # 夢幻首選
+        "gemini-2.5-flash-preview",     # 穩定次選
+        "gemini-flash-latest",          # 速度保底 (目前時空可運行)
+        "gemini-2.0-flash"              # 最後防線
     ]
     
     last_error = ""
@@ -161,8 +155,8 @@ def get_gemini_decision(ticker, api_key, intel_text):
             return result
             
         except Exception as e:
+            # 如果 3.0 還沒發布，會自動跳過抓下一個，這是正常的
             last_error = str(e)
-            print(f"⚠️ {model_name} 失敗，切換下一順位...")
             continue
             
     return {
@@ -170,14 +164,20 @@ def get_gemini_decision(ticker, api_key, intel_text):
         "reasoning": f"AI Analysis failed. Last error: {last_error}",
         "expected_return": 0.05,
         "volatility_multiplier": 1.0,
-        "model_used": "None"
+        "model_used": "Fallback"
     }
 
 def run_monte_carlo(data, days, sims, expected_return, vol_mult):
     """執行 GBM 模擬"""
+    # 計算歷史數據
     log_returns = np.log(data['Close'] / data['Close'].shift(1)).dropna()
     hist_vol = log_returns.std() * (252 ** 0.5)
+    
+    # 調整參數
     adj_vol = hist_vol * vol_mult
+    # 確保波動率有最低門檻 (避免大牛股波動太小導致區間太窄)
+    adj_vol = max(adj_vol, 0.20) 
+    
     daily_vol = adj_vol / (252 ** 0.5)
     daily_drift = (expected_return / 252) - (0.5 * daily_vol ** 2)
     
@@ -198,14 +198,7 @@ def run_monte_carlo(data, days, sims, expected_return, vol_mult):
 data = get_market_data(selected_stock)
 
 if data is None:
-    # 顯示更詳細的錯誤指引
-    st.error(f"❌ 無法獲取 {selected_stock} 的數據。")
-    st.warning("""
-    可能的解決方案：
-    1. 確認代碼是否正確 (台股請加 .TW，如 4938.TW)。
-    2. 如果你是剛部署，Yahoo Finance 可能暫時封鎖了雲端 IP，請等待 5-10 分鐘後再試。
-    3. 嘗試輸入美股代號 (如 NVDA) 測試系統是否正常。
-    """)
+    st.error(f"❌ 無法獲取 {selected_stock} 的數據。請確認代碼 (台股請加 .TW)。")
 else:
     last_price = data['Close'].iloc[-1]
     
@@ -216,19 +209,18 @@ else:
     
     st.divider()
 
-    # 按鈕邏輯
     if st.button("🚀 啟動雙引擎戰情室 (Start Analysis)", type="primary"):
         if not pplx_api_key or not google_api_key:
             st.error("❌ 請輸入 API Keys")
         else:
             with st.status("正在進行深度運算...", expanded=True) as status:
                 
-                # Step 1: 搜集情報
-                st.write("🌍 Perplexity (Sonar-Pro): 掃描 2026 市場情報...")
+                # Step 1
+                st.write("🌍 Perplexity: 掃描 2026 市場情報...")
                 intel = get_perplexity_intel(selected_stock, pplx_api_key)
                 
-                # Step 2: AI 決策
-                st.write("🧠 Gemini (Auto-Switch): 正在切換模型進行決策...")
+                # Step 2
+                st.write("🧠 Gemini: 正在切換 3.0/2.5 未來模型...")
                 ai_decision = get_gemini_decision(selected_stock, google_api_key, intel)
                 
                 ai_return = ai_decision.get("expected_return", 0.05)
@@ -236,49 +228,78 @@ else:
                 verdict = ai_decision.get("verdict", "HOLD")
                 model_used = ai_decision.get("model_used", "Unknown")
                 
-                st.success(f"決策模型鎖定: {model_used}")
-                
-                # Step 3: 模擬
-                st.write(f"📊 Monte Carlo: 執行 {simulations} 次模擬...")
+                # Step 3
+                st.write(f"📊 Monte Carlo: 執行 {simulations} 次價格模擬...")
                 paths = run_monte_carlo(data, days_to_predict, simulations, ai_return, ai_vol)
                 
                 status.update(label="分析完成！", state="complete", expanded=False)
 
-            # 結果呈現
+            # --- 結果呈現區 ---
+            
+            # 計算目標價
+            final_prices = paths[-1]
+            bull_price = np.percentile(final_prices, 95)
+            base_price = np.percentile(final_prices, 50)
+            bear_price = np.percentile(final_prices, 5)
+
+            # 顯示目標價 Metrics
+            st.subheader(f"📅 {days_to_predict} 天後價格預測")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("樂觀情境 (Bull)", f"{bull_price:.2f}", f"{(bull_price/last_price - 1)*100:.1f}%")
+            m2.metric("中位數 (Base)", f"{base_price:.2f}", f"{(base_price/last_price - 1)*100:.1f}%")
+            m3.metric("悲觀情境 (Bear)", f"{bear_price:.2f}", f"{(bear_price/last_price - 1)*100:.1f}%")
+
             col_chart, col_report = st.columns([2, 1])
             
             with col_chart:
-                st.subheader("🔮 價格路徑模擬")
                 future_dates = pd.date_range(start=data.index[-1] + timedelta(days=1), periods=days_to_predict)
                 p5 = np.percentile(paths, 5, axis=1)
                 p50 = np.percentile(paths, 50, axis=1)
                 p95 = np.percentile(paths, 95, axis=1)
                 
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=data.index[-60:], y=data['Close'][-60:], name='歷史', line=dict(color='gray')))
+                # 歷史走勢
+                fig.add_trace(go.Scatter(x=data.index[-90:], y=data['Close'][-90:], name='歷史股價', line=dict(color='white', width=1.5)))
+                # 預測區間
                 fig.add_trace(go.Scatter(x=future_dates, y=p95, mode='lines', line=dict(width=0), showlegend=False))
-                fig.add_trace(go.Scatter(x=future_dates, y=p5, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 100, 255, 0.1)', name='90% 區間'))
-                fig.add_trace(go.Scatter(x=future_dates, y=p50, mode='lines', name='預測中位數', line=dict(color='#0064ff', width=2)))
+                fig.add_trace(go.Scatter(x=future_dates, y=p5, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 255, 100, 0.1)' if verdict=="BUY" else 'rgba(255, 50, 50, 0.1)', name='90% 機率區間'))
+                # 中位數線
+                fig.add_trace(go.Scatter(x=future_dates, y=p50, mode='lines', name='預測路徑', line=dict(color='#00d2ff', width=3)))
+                
+                fig.update_layout(
+                    template="plotly_dark",
+                    height=500,
+                    title="未來價格路徑模擬 (Monte Carlo)",
+                    xaxis_title="日期",
+                    yaxis_title="股價",
+                    hovermode="x unified"
+                )
                 st.plotly_chart(fig, use_container_width=True)
                 
             with col_report:
                 st.subheader("📝 CIO 決策報告")
+                
+                # 根據 Verdict 變色
                 color_map = {"BUY": "#28a745", "SELL": "#dc3545", "HOLD": "#ffc107", "NEUTRAL": "gray"}
                 v_color = color_map.get(verdict, "gray")
                 
                 st.markdown(f"""
-                <div style="border: 2px solid {v_color}; padding: 15px; border-radius: 10px; text-align: center; margin-bottom: 20px; background-color: {v_color}10;">
-                    <h2 style="color: {v_color}; margin:0;">{verdict}</h2>
-                    <small>Model: {model_used}</small>
+                <div style="border: 2px solid {v_color}; padding: 20px; border-radius: 12px; text-align: center; margin-bottom: 20px; background-color: {v_color}20;">
+                    <h1 style="color: {v_color}; margin:0; font-size: 3em;">{verdict}</h1>
+                    <p style="margin-top: 5px; color: #ccc;">Strategy: {model_used}</p>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                st.write(ai_decision.get("reasoning"))
-                st.markdown("---")
-                st.markdown(f"- 預期趨勢: **{ai_return*100:+.1f}%**")
-                st.markdown(f"- 波動係數: **{ai_vol}x**")
+                st.markdown("### 💡 核心觀點")
+                st.info(ai_decision.get("reasoning"))
                 
-                with st.expander("查看原始情報"):
+                st.markdown("### ⚙️ 模型參數")
+                st.markdown(f"""
+                - **預期年化報酬 (Drift):** `{ai_return*100:+.1f}%`
+                - **波動率加權 (Vol Mult):** `{ai_vol}x`
+                """)
+                
+                with st.expander("查看原始情報 (Perplexity)"):
                     st.write(intel)
     
     else:
