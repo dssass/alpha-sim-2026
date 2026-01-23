@@ -231,18 +231,41 @@ else:
                         m2.metric("中位 (P50)", f"{p50[-1]:.2f}", delta=f"{(p50[-1]/last_price-1)*100:.1f}%")
                         m3.metric("樂觀 (P95)", f"{p95[-1]:.2f}", delta=f"{(p95[-1]/last_price-1)*100:.1f}%")
 
+                    # --- 在 col_report 區塊 ---
                     with col_report:
                         st.subheader("📝 CIO 決策報告")
-                        st.markdown(f"""
-                        <div style="border: 2px solid #0064ff; padding: 15px; border-radius: 10px; text-align: center; background-color: #0064ff10;">
-                            <h2 style="color: #0064ff; margin:0;">{verdict}</h2>
-                            <small>Engine: {model_used}</small>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        
+                        # ... (前面的 verdict 區塊維持不變) ...
+                        
+                        # --- 新增：交易信號強度 ---
+                        st.markdown("---")
+                        st.markdown("**交易信號強度**")
+                        
+                        # 計算盈虧比 R/R
+                        r_r_ratio = (p95[-1] - last_price) / (last_price - p5[-1]) if last_price > p5[-1] else 0
+                    
+                        # 根據 R/R 決定百分比
+                        if r_r_ratio > 1.5 and verdict == "BUY":
+                            buy_percent = 80
+                        elif r_r_ratio > 1.0 and verdict == "BUY":
+                            buy_percent = 60
+                        elif verdict == "SELL":
+                            buy_percent = 20
+                        else: # HOLD or other cases
+                            buy_percent = 50
+                        
+                        sell_percent = 100 - buy_percent
+                        
+                        # 畫出橫條圖
+                        st.progress(buy_percent / 100)
+                        st.markdown(f"🟢 **買進建議 (Buy): {buy_percent}%**")
+                        st.markdown(f"🔴 **賣出建議 (Sell): {sell_percent}%**")
+                        
                         st.info(f"**AI 分析邏輯：**\n\n{reasoning}")
                         st.write(f"📈 預期年報酬：{ai_return*100:+.1f}%")
                         st.write(f"📉 波動系數：{ai_vol}x")
                         with st.expander("情報原文"):
                             st.write(intel)
-                else:
-                    st.error("2026 旗艦引擎回傳異常，請檢查金鑰權限。")
+                                    else:
+                                        st.error("2026 旗艦引擎回傳異常，請檢查金鑰權限。")
+
