@@ -206,7 +206,7 @@ def run_monte_carlo(data, days, sims, expected_return, vol_mult, seed=42):
     
     return price_paths
 
-def get_trading_days(start_date, days_to_predict, exchange='TSE'):  # 新增: 獲取交易日
+def get_trading_days(start_date, days_to_predict, exchange='XTAI'):  # 新增: 獲取交易日
     """獲取未來交易日 (台灣股市 TSE)"""
     cal = mcal.get_calendar(exchange)
     end_date = start_date + timedelta(days=days_to_predict * 2)  # 多抓一些以防
@@ -388,3 +388,4 @@ else:
                     
                     with st.expander("情報原文"):
                         st.write(intel)
+
