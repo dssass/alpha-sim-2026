@@ -18,6 +18,8 @@ st.markdown("""
     .stButton>button {width: 100%; border-radius: 8px; height: 3.5em; font-weight: bold; font-size: 1.2em;}
     .report-box {background-color: #1e1e1e; border-left: 6px solid #ff4b4b; padding: 20px; border-radius: 10px; margin-bottom: 20px;}
     .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 8px; text-align: center;}
+    /* 讓 Plotly 圖表背景更融合 */
+    .js-plotly-plot .plotly .main-svg {background: rgba(0,0,0,0) !important;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -33,7 +35,9 @@ with st.sidebar:
     st.divider()
     
     st.header("🎯 標的設定")
+    # 預設給個 4938.TW (和碩) 當範例
     selected_stock = st.text_input("股票代碼 (Ticker)", "4938.TW") 
+    st.caption("💡 台股請務必加上 .TW (例如: 00733.TW)")
     
     st.subheader("模擬參數")
     simulations = st.slider("模擬路徑數 (N)", 500, 3000, 1000)
@@ -48,18 +52,22 @@ def get_market_data(ticker):
         stock = yf.Ticker(ticker)
         data = stock.history(period="2y")
         
+        # 備用方案
         if data.empty:
             data = yf.download(ticker, period="2y", interval="1d", progress=False)
         
         if data.empty:
             return None
         
+        # 清洗 MultiIndex
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
             
+        # 移除時區
         if data.index.tz is not None:
             data.index = data.index.tz_localize(None)
 
+        # 確保有 Close
         if 'Close' not in data.columns:
             if 'Adj Close' in data.columns:
                 data['Close'] = data['Adj Close']
@@ -96,6 +104,7 @@ def get_perplexity_intel(ticker, api_key):
         return f"Perplexity Error: {str(e)}"
 
 def clean_json_string(json_str):
+    """清洗 JSON 字串，移除 Markdown 標記"""
     try:
         cleaned = re.sub(r"```json\s*", "", json_str, flags=re.IGNORECASE)
         cleaned = re.sub(r"```", "", cleaned)
@@ -104,20 +113,25 @@ def clean_json_string(json_str):
         return json_str
 
 def get_gemini_decision(ticker, api_key, intel_text):
-    """引擎 B: 決策與參數設定 (2026 未來版)"""
+    """引擎 B: 決策與參數設定 (修復幻覺 + 未來模型)"""
     if not api_key: return None
     
     genai.configure(api_key=api_key)
     
-    # 🔥 強制 AI 給出明確數字，避免死魚線
+    # 🔥 關鍵修復：加入 CRITICAL CONTEXT RULES 防止台美股混淆
     prompt = f"""
     You are an aggressive Quantitative Portfolio Manager in 2026. Target: {ticker}
     Intel: {intel_text}
     
+    CRITICAL CONTEXT RULES:
+    1. If the ticker ends with ".TW" (e.g., 2330.TW, 00733.TW), it is a **TAIWAN STOCK**. 
+    2. DO NOT confuse it with US stocks that have similar ticker symbols (e.g., do not confuse '00733.TW' with 'TW' Tradeweb Markets).
+    3. Analyze the stock based on the TAIWAN market context (TWD currency, Taiwan supply chain).
+
     Task:
     Determine 'Expected Annual Return' (drift) and 'Volatility Multiplier'.
     
-    CRITICAL RULES:
+    CRITICAL STRATEGY RULES:
     1. If Verdict is BUY, 'expected_return' MUST be significant (e.g., > 0.20 for 20% annual).
     2. If Verdict is SELL, 'expected_return' MUST be negative (e.g., -0.15).
     3. 'volatility_multiplier': If the stock is an AI/Tech stock, this should be > 1.2.
@@ -131,11 +145,11 @@ def get_gemini_decision(ticker, api_key, intel_text):
     }}
     """
     
-    # 🔥 2026 年頂規模型清單 (依照你的指示)
+    # 🔥 2026 頂規模型清單 (含向下兼容)
     models = [
         "gemini-3-flash-preview",       # 夢幻首選
         "gemini-2.5-flash-preview",     # 穩定次選
-        "gemini-flash-latest",          # 速度保底 (目前時空可運行)
+        "gemini-flash-latest",          # 速度保底
         "gemini-2.0-flash"              # 最後防線
     ]
     
@@ -155,7 +169,6 @@ def get_gemini_decision(ticker, api_key, intel_text):
             return result
             
         except Exception as e:
-            # 如果 3.0 還沒發布，會自動跳過抓下一個，這是正常的
             last_error = str(e)
             continue
             
@@ -198,7 +211,8 @@ def run_monte_carlo(data, days, sims, expected_return, vol_mult):
 data = get_market_data(selected_stock)
 
 if data is None:
-    st.error(f"❌ 無法獲取 {selected_stock} 的數據。請確認代碼 (台股請加 .TW)。")
+    st.error(f"❌ 無法獲取 {selected_stock} 的數據。")
+    st.warning("請確認代碼是否正確 (台股請加 .TW)。Yahoo Finance 可能暫時不穩，請稍後再試。")
 else:
     last_price = data['Close'].iloc[-1]
     
