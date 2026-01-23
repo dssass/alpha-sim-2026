@@ -113,19 +113,19 @@ def clean_json_string(json_str):
         return json_str
 
 def get_gemini_decision(ticker, api_key, intel_text):
-    """引擎 B: 決策與參數設定 (修復幻覺 + 未來模型)"""
+    """引擎 B: 決策與參數設定 (2026 最終修復版)"""
     if not api_key: return None
     
     genai.configure(api_key=api_key)
     
-    # 🔥 關鍵修復：加入 CRITICAL CONTEXT RULES 防止台美股混淆
+    # 🔥 Prompt 包含：台股防呆 + 激進策略 + JSON 格式強制
     prompt = f"""
     You are an aggressive Quantitative Portfolio Manager in 2026. Target: {ticker}
     Intel: {intel_text}
     
     CRITICAL CONTEXT RULES:
     1. If the ticker ends with ".TW" (e.g., 2330.TW, 00733.TW), it is a **TAIWAN STOCK**. 
-    2. DO NOT confuse it with US stocks that have similar ticker symbols (e.g., do not confuse '00733.TW' with 'TW' Tradeweb Markets).
+    2. DO NOT confuse it with US stocks that have similar ticker symbols.
     3. Analyze the stock based on the TAIWAN market context (TWD currency, Taiwan supply chain).
 
     Task:
@@ -145,7 +145,7 @@ def get_gemini_decision(ticker, api_key, intel_text):
     }}
     """
     
-    # 🔥 2026 頂規模型清單 (含向下兼容)
+    # 🔥 2026 頂規模型清單
     models = [
         "gemini-3-flash-preview",       # 夢幻首選
         "gemini-2.5-flash-preview",     # 穩定次選
@@ -318,3 +318,4 @@ else:
     
     else:
         st.info("👈 請輸入 API Keys 並點擊按鈕，開始 2026 AI 戰情分析！")
+
