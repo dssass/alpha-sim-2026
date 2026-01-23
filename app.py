@@ -87,11 +87,8 @@ def run_monte_carlo(data, days, sims, expected_return, vol_mult):
     return price_paths
 
 # --- 3. Cookie 管理器初始化 ---
-@st.cache_resource
-def get_cookie_manager():
-    return stx.CookieManager()
-
-cookie_manager = get_cookie_manager()
+# 關鍵：移除 @st.cache_resource 裝飾器
+cookie_manager = stx.CookieManager()
 
 # --- 4. 側邊欄：金鑰管理 (Cookie 邏輯) ---
 with st.sidebar:
@@ -108,9 +105,10 @@ with st.sidebar:
 
     col_btn1, col_btn2 = st.columns(2)
     if col_btn1.button("記住我"):
+        # 設定 Cookie 效期
         cookie_manager.set("pplx_key", pplx_input, key="set_pplx")
         cookie_manager.set("google_key", google_input, key="set_google")
-        st.success("✅ 已記憶")
+        st.success("✅ 已記憶，請手動重新整理網頁")
     
     if col_btn2.button("清除記憶"):
         cookie_manager.delete("pplx_key")
@@ -134,7 +132,6 @@ else:
     st.subheader(f"📊 標的分析：{selected_stock} | 當前股價：{last_price:.2f}")
     
     if st.button("🚀 執行 AI 深度量化預測", type="primary"):
-        # 這裡優先使用輸入框的內容
         if not pplx_input or not google_input:
             st.error("❌ 請輸入 API Keys。")
         else:
@@ -175,3 +172,5 @@ else:
                         st.write(f"預期報酬: {ai_return*100:+.1f}% | 波動調整: {ai_vol}x")
                         with st.expander("情報原文"):
                             st.write(intel)
+                else:
+                    st.error("AI 決策引擎發生錯誤，請稍後再試。")
