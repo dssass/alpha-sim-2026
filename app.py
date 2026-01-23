@@ -113,39 +113,47 @@ def clean_json_string(json_str):
         return json_str
 
 def get_gemini_decision(ticker, api_key, intel_text):
-    """引擎 B: 決策與參數設定 (2026 最終修復版)"""
+    """引擎 B: 決策與參數設定 (深思熟慮版 - Chain of Thought)"""
     if not api_key: return None
     
     genai.configure(api_key=api_key)
     
-    # 🔥 Prompt 包含：台股防呆 + 激進策略 + JSON 格式強制
+    # 🔥 修改點：加入「思維鏈 (Chain of Thought)」指令
+    # 強迫 AI 在給出 Verdict 之前，必須先完成 4 個思考步驟
     prompt = f"""
-    You are an aggressive Quantitative Portfolio Manager in 2026. Target: {ticker}
+    You are a **Senior Chief Investment Officer (CIO)** in 2026. Target: {ticker}
     Intel: {intel_text}
     
     CRITICAL CONTEXT RULES:
-    1. If the ticker ends with ".TW" (e.g., 2330.TW, 00733.TW), it is a **TAIWAN STOCK**. 
-    2. DO NOT confuse it with US stocks that have similar ticker symbols.
-    3. Analyze the stock based on the TAIWAN market context (TWD currency, Taiwan supply chain).
+    1. If ticker ends with ".TW", it is a TAIWAN STOCK. Analyze in TWD context.
+    2. Do not confuse with US stocks.
 
     Task:
-    Determine 'Expected Annual Return' (drift) and 'Volatility Multiplier'.
+    Perform a "Deep-Dive Risk Analysis" before making a decision.
     
-    CRITICAL STRATEGY RULES:
-    1. If Verdict is BUY, 'expected_return' MUST be significant (e.g., > 0.20 for 20% annual).
-    2. If Verdict is SELL, 'expected_return' MUST be negative (e.g., -0.15).
-    3. 'volatility_multiplier': If the stock is an AI/Tech stock, this should be > 1.2.
-    
-    Output JSON ONLY:
+    🧠 **THINKING PROTOCOL (You MUST follow this step-by-step):**
+    1. **Step 1 (Skepticism):** Assume the good news is exaggerated. What could go wrong? (e.g., Competition, Margin pressure).
+    2. **Step 2 (Valuation Check):** Is the stock already too expensive? Is the upside priced in?
+    3. **Step 3 (Scenario Planning):** If the market crashes tomorrow, does this stock have a safety margin?
+    4. **Step 4 (Final Verdict):** Only after steps 1-3, decide BUY/SELL/HOLD.
+
+    ⛔ **STRICT JUDGMENT RULES:**
+    - If you find ANY significant red flag in Step 1 or 2 -> **HOLD** or **SELL**.
+    - **BUY** is reserved ONLY for "High Conviction, Low Risk" opportunities.
+    - **SELL** if the trend is broken or valuation is absurd.
+
+    Output JSON ONLY (Include your thinking process in the 'thinking_log' field):
     {{
+        "thinking_log": "Step 1: The revenue looks good BUT... Step 2: However, the PE ratio is... Step 3: ...",
         "verdict": "BUY/SELL/HOLD",
-        "reasoning": "Short summary...",
-        "expected_return": 0.25,
-        "volatility_multiplier": 1.2
+        "reasoning": "Final summary based on the thinking log.",
+        "expected_return": 0.05,
+        "volatility_multiplier": 1.0
     }}
     """
     
-    # 🔥 2026 頂規模型清單
+    # 🔥 模型清單：加入 "gemini-2.0-flash-thinking-exp" 
+    # 這是 Google 專門為了「思考 (Reasoning)」設計的模型，如果有的話會優先用
     models = [
         "gemini-3-flash-preview",       # 夢幻首選
         "gemini-2.5-flash-preview",     # 穩定次選
@@ -158,13 +166,24 @@ def get_gemini_decision(ticker, api_key, intel_text):
     for model_name in models:
         try:
             model = genai.GenerativeModel(model_name)
-            response = model.generate_content(
-                prompt, 
-                generation_config={"response_mime_type": "application/json"}
-            )
+            # 這裡不限制 response_mime_type 為 json，因為思考模型有時候會吐太多文字
+            # 我們靠 clean_json_string 來處理
+            response = model.generate_content(prompt)
             
             cleaned_text = clean_json_string(response.text)
-            result = json.loads(cleaned_text)
+            
+            # 有時候 AI 會在 JSON 前面講廢話，我們嘗試提取 JSON 部分
+            try:
+                # 嘗試直接解析
+                result = json.loads(cleaned_text)
+            except:
+                # 如果失敗，嘗試用正則表達式抓取 { ... }
+                match = re.search(r"\{.*\}", cleaned_text, re.DOTALL)
+                if match:
+                    result = json.loads(match.group(0))
+                else:
+                    raise ValueError("No JSON found")
+
             result['model_used'] = model_name 
             return result
             
