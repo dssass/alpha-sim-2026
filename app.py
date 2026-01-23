@@ -8,9 +8,9 @@ from openai import OpenAI
 import google.generativeai as genai
 import json
 import re
-import os # <-- 新增: 用於檢查檔案是否存在
+import os
 
-# --- 0. 金鑰儲存功能 (新功能) ---
+# --- 0. 金鑰儲存功能 ---
 KEYS_FILE = "api_keys.json"
 
 def save_api_keys(pplx_key, google_key):
@@ -31,7 +31,6 @@ def load_api_keys():
             with open(KEYS_FILE, "r") as f:
                 return json.load(f)
         except (json.JSONDecodeError, FileNotFoundError):
-            # 如果檔案是空的或格式錯誤，回傳空字典
             return {}
     return {}
 
@@ -39,12 +38,38 @@ def load_api_keys():
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="Alpha-Sim: 2026 AI 戰情室", layout="wide", page_icon="🛡️")
 
-# 自定義 CSS
+# 自定義 CSS (新增進度條樣式)
 st.markdown("""
     <style>
     .stButton>button {width: 100%; border-radius: 8px; height: 3.5em; font-weight: bold; font-size: 1.2em;}
     .report-box {background-color: #f0f2f6; border-left: 6px solid #ff4b4b; padding: 20px; border-radius: 10px; margin-bottom: 20px;}
     .metric-container {background-color: #ffffff; padding: 10px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05);}
+    
+    /* 進度條容器 */
+    .progress-container {
+        width: 100%;
+        background-color: #e9ecef;
+        border-radius: 5px;
+        margin-bottom: 10px;
+    }
+    /* 買進條 (綠色) */
+    .buy-bar {
+        height: 10px;
+        background-color: #28a745;
+        border-radius: 5px;
+        text-align: right;
+        line-height: 10px;
+        color: white;
+    }
+    /* 賣出條 (紅色) */
+    .sell-bar {
+        height: 10px;
+        background-color: #dc3545;
+        border-radius: 5px;
+        text-align: right;
+        line-height: 10px;
+        color: white;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -55,18 +80,17 @@ st.caption("架構：Perplexity (情報搜集) ➡ Gemini (參數決策) ➡ Mon
 with st.sidebar:
     st.header("🔑 啟動金鑰")
     
-    # --- 金鑰管理 UI (已更新) ---
     saved_keys = load_api_keys()
     
     pplx_api_key = st.text_input(
         "Perplexity API Key", 
         type="password",
-        value=saved_keys.get("perplexity_api_key", "") # 自動填入已儲存的 key
+        value=saved_keys.get("perplexity_api_key", "")
     )
     google_api_key = st.text_input(
         "Google AI Studio Key", 
         type="password",
-        value=saved_keys.get("google_api_key", "") # 自動填入已儲存的 key
+        value=saved_keys.get("google_api_key", "")
     )
     
     if st.button("儲存金鑰 (Save Keys)"):
@@ -91,7 +115,6 @@ with st.sidebar:
 
 @st.cache_data(ttl=3600)
 def get_market_data(ticker):
-    """抓取歷史股價數據"""
     try:
         data = yf.download(ticker, period="2y", interval="1d", auto_adjust=True, progress=False)
         if isinstance(data.columns, pd.MultiIndex):
@@ -103,7 +126,6 @@ def get_market_data(ticker):
         return None
 
 def get_perplexity_intel(ticker, api_key):
-    """引擎 A: 搜尋最新情報 (使用 Sonar-Pro)"""
     if not api_key: return "Perplexity API Key 未提供。"
     
     client = OpenAI(api_key=api_key, base_url="https://api.perplexity.ai")
@@ -129,17 +151,20 @@ def get_perplexity_intel(ticker, api_key):
         return f"Perplexity Error: {str(e)}"
 
 def get_gemini_decision(ticker, api_key, intel_text):
-    """引擎 B: 決策與參數設定 (Agentic) - 2026 旗艦版"""
+    """引擎 B: 決策與參數設定 (新增：買賣信心度)"""
     if not api_key: return {
         "verdict": "NEUTRAL",
         "reasoning": "Google AI Studio Key 未提供。",
         "expected_return": 0.05,
         "volatility_multiplier": 1.0,
+        "buy_prob": 50,
+        "sell_prob": 50,
         "model_used": "None"
     }
     
     genai.configure(api_key=api_key)
     
+    # 修改 Prompt: 加入 buy_prob 與 sell_prob 的要求
     prompt = f"""
     You are a Quantitative Portfolio Manager in year 2026. 
     Target Stock: {ticker}
@@ -148,28 +173,30 @@ def get_gemini_decision(ticker, api_key, intel_text):
     
     Task:
     1. Analyze the sentiment based on 2026 market conditions.
-    2. Determine the 'Expected Annual Return' (drift) for a Monte Carlo simulation.
+    2. Determine the 'Expected Annual Return' (drift) for Monte Carlo.
        - Range: -0.30 (Crash) to +0.50 (To the moon).
-       - 0.0 means neutral/sideways.
     3. Determine the 'Volatility Multiplier'.
-       - 1.0 = Normal historical volatility.
-       - >1.0 = High uncertainty/Risk.
-       - <1.0 = Stable.
+    4. **Assign specific probabilities (0-100) for trading recommendations.**
+       - "buy_prob": Probability that now is a good entry point.
+       - "sell_prob": Probability that now is a good exit point.
+       - Note: If sentiment is Neutral/Hold, both can be low, or balanced around 50.
     
     Output strictly in JSON format:
     {{
         "verdict": "BUY" or "HOLD" or "SELL",
-        "reasoning": "Short summary of why...",
+        "reasoning": "Short summary...",
         "expected_return": 0.15,
-        "volatility_multiplier": 1.1
+        "volatility_multiplier": 1.1,
+        "buy_prob": 85,
+        "sell_prob": 15
     }}
     """
     
     models = [
         "gemini-3-flash-preview",
         "gemini-2.5-flash-preview",
-        "gemini-flash-latest",
-        "gemini-2.0-flash"
+        "gemini-2.0-flash",
+        "gemini-flash-latest"
     ]
     
     last_error = ""
@@ -183,6 +210,9 @@ def get_gemini_decision(ticker, api_key, intel_text):
             )
             result = json.loads(response.text)
             result['model_used'] = model_name 
+            # 確保有這兩個 key，沒有的話給預設值
+            if 'buy_prob' not in result: result['buy_prob'] = 50
+            if 'sell_prob' not in result: result['sell_prob'] = 50
             return result
         except Exception as e:
             last_error = str(e)
@@ -191,14 +221,15 @@ def get_gemini_decision(ticker, api_key, intel_text):
             
     return {
         "verdict": "NEUTRAL",
-        "reasoning": f"AI Analysis failed across all models. Last error: {last_error}",
+        "reasoning": f"AI Analysis failed. Last error: {last_error}",
         "expected_return": 0.05,
         "volatility_multiplier": 1.0,
+        "buy_prob": 0,
+        "sell_prob": 0,
         "model_used": "None"
     }
 
 def run_monte_carlo(data, days, sims, expected_return, vol_mult):
-    """執行數學模擬 (GBM 模型)"""
     log_returns = np.log(data['Close'] / data['Close'].shift(1)).dropna()
     hist_vol = log_returns.std() * (252 ** 0.5)
     adj_vol = hist_vol * vol_mult
@@ -232,7 +263,6 @@ else:
     st.divider()
 
     if st.button("🚀 啟動雙引擎戰情室 (Start Analysis)", type="primary"):
-        # 使用側邊欄輸入框中的最新值
         if not pplx_api_key or not google_api_key:
             st.error("❌ 請先在側邊欄輸入 API Keys 才能啟動大師級分析。")
         else:
@@ -250,7 +280,11 @@ else:
                 reasoning = ai_decision.get("reasoning", "No data")
                 model_used = ai_decision.get("model_used", "Unknown")
                 
-                st.write(f"⚙️ 參數設定完成 (Model: {model_used}): 預期年化報酬 {ai_return*100:.1f}%, 波動加權 {ai_vol}x")
+                # 取得買賣機率
+                buy_prob = ai_decision.get("buy_prob", 50)
+                sell_prob = ai_decision.get("sell_prob", 50)
+                
+                st.write(f"⚙️ 參數設定完成 (Model: {model_used}): Buy {buy_prob}% / Sell {sell_prob}%")
                 
                 st.write(f"📊 Monte Carlo: 正在執行 {simulations} 次平行宇宙模擬...")
                 paths = run_monte_carlo(data, days_to_predict, simulations, ai_return, ai_vol)
@@ -286,6 +320,7 @@ else:
             with col_report:
                 st.subheader("📝 CIO 決策報告")
                 
+                # 顯示大大的 Buy/Sell/Hold
                 color_map = {"BUY": "#28a745", "SELL": "#dc3545", "HOLD": "#ffc107", "NEUTRAL": "gray"}
                 v_color = color_map.get(verdict, "gray")
                 
@@ -295,12 +330,40 @@ else:
                     <small>Strategy Engine: {model_used}</small>
                 </div>
                 """, unsafe_allow_html=True)
+
+                # --- 新增：買賣推薦 % 視覺化 ---
+                st.markdown("#### 🎯 交易信號強度")
+                
+                # 買進條 (HTML/CSS)
+                st.markdown(f"""
+                <div style="margin-bottom: 8px; font-size:0.9em;">
+                    <div style="display:flex; justify-content:space-between;">
+                        <b>🔥 買進建議 (Buy)</b> <b>{buy_prob}%</b>
+                    </div>
+                    <div class="progress-container">
+                        <div class="buy-bar" style="width: {buy_prob}%;"></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # 賣出條 (HTML/CSS)
+                st.markdown(f"""
+                <div style="margin-bottom: 20px; font-size:0.9em;">
+                    <div style="display:flex; justify-content:space-between;">
+                        <b>❄️ 賣出建議 (Sell)</b> <b>{sell_prob}%</b>
+                    </div>
+                    <div class="progress-container">
+                        <div class="sell-bar" style="width: {sell_prob}%;"></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                # -----------------------------------
                 
                 st.markdown(f"**AI 觀點摘要：**\n\n{reasoning}")
                 st.markdown("---")
-                st.markdown("**模型參數 (AI 設定)：**")
-                st.markdown(f"- 預期趨勢 (Drift): **{ai_return*100:+.1f}%**")
-                st.markdown(f"- 波動係數 (Vol): **{ai_vol}x**")
+                st.markdown("**模型參數：**")
+                st.markdown(f"- 預期趨勢: **{ai_return*100:+.1f}%**")
+                st.markdown(f"- 波動係數: **{ai_vol}x**")
                 
                 with st.expander("查看 Perplexity 原始情報"):
                     st.write(intel)
