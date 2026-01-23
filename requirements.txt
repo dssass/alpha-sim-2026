@@ -6,3 +6,4 @@ numpy
 openai
 google-generativeai
 extra-streamlit-components
+pandas_market_calendars
