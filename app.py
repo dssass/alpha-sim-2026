@@ -517,5 +517,3 @@ else:
                     
                     with st.expander("情報原文"):
                         st.write(intel)
-```
-
