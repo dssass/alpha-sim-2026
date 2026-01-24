@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 from datetime import date, timedelta
 import yfinance as yf
@@ -10,6 +11,7 @@ import json
 import logging
 import threading
 import pandas_market_calendars as mcal  # 新增: 用於處理交易日
+import requests  # 新增: 用於 FinMind API
 
 # 設定 logging 以便 debug
 logging.basicConfig(level=logging.INFO)
@@ -27,8 +29,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🛡️ Alpha-Sim: 雙引擎量化決策系統 (2026 進化版)")
-st.caption("核心：Perplexity (情報) + Gemini (決策) + Monte Carlo (風控) + Fundamental (價值過濾)")
+st.title("🛡️ 股票輔助系統")
 
 # --- 2. 核心邏輯函數 ---
 @st.cache_data(ttl=3600)
@@ -49,30 +50,95 @@ def get_market_data(ticker):
         logging.error(f"get_market_data error: {e}")
         return None
 
+@st.cache_data(ttl=3600 * 6)  # 6 小時更新一次
+def get_fundamentals_finmind(ticker, token):
+    """使用 FinMind 抓取台股基本面數據"""
+    if not token:
+        st.warning("FinMind Token 缺失，使用 yfinance fallback")
+        return get_fundamentals_yfinance(ticker)  # fallback 到原 yfinance
+
+    stock_id = ticker.replace(".TW", "")  # e.g. 2330
+
+    # 抓最新季報（綜合損益表、資產負債表、現金流量表）
+    datasets = [
+        "TaiwanStockFinancialStatements",  # 損益表
+        "TaiwanStockBalanceSheet",         # 資產負債
+        "TaiwanStockCashFlowsStatement",   # 現金流量
+        "TaiwanStockPER",                  # PER / PBR
+    ]
+
+    fundamentals = {}
+    start_date = (date.today() - timedelta(days=365*2)).strftime("%Y-%m-%d")  # 抓近2年
+
+    for ds in datasets:
+        url = "https://api.finmindtrade.com/api/v4/data"
+        params = {
+            "dataset": ds,
+            "data_id": stock_id,
+            "start_date": start_date,
+            "token": token,
+        }
+        try:
+            res = requests.get(url, params=params)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get('msg') == 'success' and data.get('data'):
+                    df = pd.DataFrame(data['data'])
+                    # 取最新一筆
+                    latest = df.iloc[-1] if not df.empty else None
+                    if latest is not None:
+                        if ds == "TaiwanStockPER":
+                            fundamentals['pe_ratio'] = latest.get('PE')
+                            fundamentals['price_to_book'] = latest.get('PBR')
+                        elif ds == "TaiwanStockCashFlowsStatement":
+                            # FCF 近似：營運現金流 - 資本支出
+                            op_cf = latest.get('NetCashFlowsFromUsedInOperatingActivities', 0)
+                            capex = abs(latest.get('PurchaseOfPropertyPlantAndEquipment', 0))  # 負值轉正
+                            fundamentals['free_cashflow'] = op_cf - capex if op_cf and capex else None
+                        elif ds == "TaiwanStockFinancialStatements":
+                            fundamentals['profit_margins'] = latest.get('NetProfitMargin', None)
+                            fundamentals['revenue_growth'] = latest.get('RevenueGrowthRate', None)  # 成長率
+        except Exception as e:
+            logging.error(f"FinMind {ds} error: {e}")
+
+    # 自算 PEG 近似（如果有 forward PE 和成長率，從 yfinance 補）
+    yf_fund = get_fundamentals_yfinance(ticker)
+    fundamentals['forward_pe'] = yf_fund.get('forwardPE', None)
+    if fundamentals.get('forward_pe') and fundamentals.get('revenue_growth'):
+        growth = fundamentals['revenue_growth'] * 100  # 轉 %
+        if growth > 0:
+            fundamentals['peg_ratio'] = fundamentals['forward_pe'] / growth
+
+    # 如果 FinMind 缺值，用 yfinance 補
+    for key, val in yf_fund.items():
+        if key not in fundamentals or fundamentals[key] is None:
+            fundamentals[key] = val
+
+    return fundamentals
+
 @st.cache_data(ttl=3600)
-def get_fundamentals(ticker):
-    """抓取基本面數據：避開 PE 陷阱"""
+def get_fundamentals_yfinance(ticker):
+    """原 yfinance fallback 函數"""
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
         
-        # 提取關鍵數據，若無則回傳 N/A
         fundamentals = {
             "pe_ratio": info.get('trailingPE', None),
             "forward_pe": info.get('forwardPE', None),
-            "peg_ratio": info.get('pegRatio', None),  # 重點：本益成長比
+            "peg_ratio": info.get('pegRatio', None),
             "price_to_book": info.get('priceToBook', None),
-            "free_cashflow": info.get('freeCashflow', None),  # 重點：真錢
+            "free_cashflow": info.get('freeCashflow', None),
             "debt_to_equity": info.get('debtToEquity', None),
             "profit_margins": info.get('profitMargins', None),
-            "roic": info.get('returnOnEquity', None),  # 使用 ROE 作為 ROIC 近似
+            "roic": info.get('returnOnEquity', None),
             "fcf_yield": (info.get('freeCashflow', 0) / info.get('marketCap', 1)) if info.get('marketCap', 1) != 0 else None,
             "revenue_growth": info.get('revenueGrowth', None),
             "industry": info.get('industry', 'Unknown')
         }
         return fundamentals
     except Exception as e:
-        logging.error(f"get_fundamentals error: {e}")
+        logging.error(f"yfinance fundamentals error: {e}")
         return {}
 
 def get_perplexity_intel(ticker, api_key):
@@ -183,55 +249,108 @@ Output STRICT JSON only:
         "model_used": "Fallback"
     }
 
-def run_monte_carlo(data, days, sims, expected_return, vol_mult, seed=42):
-    """執行 2026 量化風險模擬 (GBM)，添加 seed 以重現"""
-    np.random.seed(seed)  # 可重現性
-    log_returns = np.log(data['Close'] / data['Close'].shift(1)).dropna()
-    hist_vol = log_returns.std() * np.sqrt(250)  # 台灣股市約 250 交易日
+def run_bootstrap_monte_carlo(data, days, sims, expected_return, vol_mult=1.0, seed=42, block_size=5):
+    """
+    Historical Bootstrap Monte Carlo (Block Bootstrap for better dependence capture)
+    - 從歷史 log returns 有放回抽樣
+    - block_size: 區塊大小，捕捉序列相關性（default 5 天）
+    - 加 drift (expected_return) 來調整長期預期
+    """
+    np.random.seed(seed)
+    log_returns = np.log(data['Close'] / data['Close'].shift(1)).dropna().values
     
-    adj_vol = hist_vol * max(0.8, min(2.5, vol_mult))  # 調整範圍
-    daily_vol = adj_vol / np.sqrt(250)
-    daily_drift = (expected_return / 250) - (0.5 * daily_vol ** 2)
+    if len(log_returns) < block_size:
+        raise ValueError("歷史數據太少，無法進行 bootstrap")
+    
+    n_returns = len(log_returns)
+    num_blocks = days // block_size + 1  # 足夠區塊
     
     last_price = data['Close'].iloc[-1]
+    paths = np.full((days, sims), last_price)  # 初始化
     
-    Z = np.random.normal(0, 1, (days, sims))
-    daily_returns = np.exp(daily_drift + daily_vol * Z)
+    for sim in range(sims):
+        path = [last_price]
+        for _ in range(num_blocks):
+            # 隨機選取起始點，抽取 block
+            start_idx = np.random.randint(0, n_returns - block_size + 1)
+            block = log_returns[start_idx : start_idx + block_size]
+            # 加 drift (每日)
+            block_adjusted = block + (expected_return / 250) * vol_mult
+            path.extend(np.exp(np.cumsum(block_adjusted)) * path[-1])
+        
+        # 截取到 days 天
+        path = path[1:days+1]  # 從第1天開始
+        if len(path) > days:
+            path = path[:days]
+        paths[:, sim] = path
     
-    price_paths = np.zeros_like(daily_returns)
-    price_paths[0] = last_price
-    
-    for t in range(1, days):
-        price_paths[t] = price_paths[t-1] * daily_returns[t]
-    
-    return price_paths
+    return paths
 
-def get_trading_days(start_date, days_to_predict, exchange='XTAI'):  # 新增: 獲取交易日
-    cal = mcal.get_calendar(exchange)
-    end_date = start_date + timedelta(days=days_to_predict * 2)  # 多抓一些以防
-    schedule = cal.schedule(start_date=start_date, end_date=end_date)
-    return schedule.index[:days_to_predict]  # 取前 N 個交易日
+def calculate_risk_metrics(paths, last_price, confidence=0.95):
+    """
+    從模擬路徑計算 VaR & CVaR (最後一天)
+    返回：VaR (正值=最大虧損%), CVaR (正值=條件平均虧損%)
+    """
+    final_prices = paths[-1, :]
+    returns = (final_prices - last_price) / last_price
+    
+    sorted_returns = np.sort(returns)
+    var_idx = int((1 - confidence) * len(sorted_returns))
+    var = -sorted_returns[var_idx]  # 轉正值
+    
+    # CVaR: VaR 以下的平均
+    cvar = -np.mean(sorted_returns[:var_idx+1])
+    
+    return var, cvar
+
+def get_trading_days(start_date, days_to_predict, exchange='XTAI'):
+    """獲取未來交易日 (台灣股市使用 XTAI)"""
+    try:
+        cal = mcal.get_calendar(exchange)
+        end_date = start_date + timedelta(days=days_to_predict * 2)  # 多抓一些以防
+        schedule = cal.schedule(start_date=start_date, end_date=end_date)
+        trading_days = schedule.index[:days_to_predict]
+        if len(trading_days) < days_to_predict:
+            st.warning(f"可用交易日僅 {len(trading_days)} 天（可能因假期或資料限制）")
+        return trading_days
+    except Exception as e:
+        st.warning(f"無法載入 {exchange} 行事曆：{str(e)}。改用簡易日曆日（忽略假日）。")
+        # fallback 到簡易版（只排除週末）
+        future_dates = []
+        current = start_date
+        count = 0
+        while count < days_to_predict:
+            if current.weekday() < 5:  # 週一~週五
+                future_dates.append(current)
+                count += 1
+            current += timedelta(days=1)
+        return pd.DatetimeIndex(future_dates)
 
 # --- 3. Session State 管理器 (提高安全，不用 cookie) ---
 if 'pplx_key' not in st.session_state:
     st.session_state['pplx_key'] = ''
 if 'google_key' not in st.session_state:
     st.session_state['google_key'] = ''
+if 'finmind_token' not in st.session_state:
+    st.session_state['finmind_token'] = ''
 
 # --- 4. 側邊欄：設定 ---
 with st.sidebar:
     st.header("🔑 金鑰管理")
     pplx_api_key = st.text_input("Perplexity API Key", type="password", value=st.session_state['pplx_key'])
     google_api_key = st.text_input("Google AI Studio Key", type="password", value=st.session_state['google_key'])
+    finmind_token = st.text_input("FinMind API Token", type="password", value=st.session_state['finmind_token'])
     
     col_btn1, col_btn2 = st.columns(2)
     if col_btn1.button("記住我"):
         st.session_state['pplx_key'] = pplx_api_key
         st.session_state['google_key'] = google_api_key
+        st.session_state['finmind_token'] = finmind_token
         st.success("✅ 已儲存於 session (伺服器端)")
     if col_btn2.button("清除"):
         st.session_state['pplx_key'] = ''
         st.session_state['google_key'] = ''
+        st.session_state['finmind_token'] = ''
         st.rerun()
     
     st.divider()
@@ -247,8 +366,8 @@ if data is None:
 else:
     last_price = data['Close'].iloc[-1]
     
-    # 抓取基本面
-    fundamentals = get_fundamentals(selected_stock)
+    # 抓取基本面（優先 FinMind）
+    fundamentals = get_fundamentals_finmind(selected_stock, st.session_state['finmind_token'])
     
     # --- 顯示基本面看板 ---
     st.subheader(f"📊 {selected_stock} 綜合戰情板 | 參考價：{last_price:.2f}")
@@ -320,11 +439,11 @@ else:
                     reasoning = ai_decision.get("reasoning", "No data")
                     model_used = ai_decision.get("model_used", "Unknown")
                     
-                    st.write(f"📊 Monte Carlo: 使用 {model_used} 執行模擬...")
+                    st.write(f"📊 Bootstrap Monte Carlo: 使用 {model_used} 執行模擬...")
                     # 背景執行模擬以優化性能
                     def run_sim():
                         global paths
-                        paths = run_monte_carlo(data, days_to_predict, simulations, ai_return, ai_vol)
+                        paths = run_bootstrap_monte_carlo(data, days_to_predict, simulations, ai_return, ai_vol)
                     
                     thread = threading.Thread(target=run_sim)
                     thread.start()
@@ -362,6 +481,17 @@ else:
                     m1.metric("悲觀 (P5)", f"{p5[-1]:.2f}", delta=f"{(p5[-1]/last_price-1)*100:.1f}%", delta_color="inverse")
                     m2.metric("中位 (P50)", f"{p50[-1]:.2f}", delta=f"{(p50[-1]/last_price-1)*100:.1f}%")
                     m3.metric("樂觀 (P95)", f"{p95[-1]:.2f}", delta=f"{(p95[-1]/last_price-1)*100:.1f}%")
+                    
+                    # 新增風險指標
+                    st.subheader("風險指標 (Bootstrap 模擬)")
+                    var_95, cvar_95 = calculate_risk_metrics(paths, last_price)
+                    r1, r2 = st.columns(2)
+                    r1.metric("VaR 95% (最大預期虧損)", f"-{var_95*100:.1f}%", delta_color="inverse", help="95% 信心水準下，最壞情況虧損幅度")
+                    r2.metric("CVaR 95% (尾端條件虧損)", f"-{cvar_95*100:.1f}%", delta_color="inverse", help="超過 VaR 的平均虧損，更嚴格尾端風險")
+                    
+                    if cvar_95 > 0.30:
+                        st.error(f"⚠️ 高尾端風險！CVaR 95% = -{cvar_95*100:.1f}%，黑天鵝情境下可能劇烈下跌。")
+                
                 with col_report:
                     st.subheader("📝 教授決策報告")
                     
@@ -387,3 +517,4 @@ else:
                     
                     with st.expander("情報原文"):
                         st.write(intel)
+```
