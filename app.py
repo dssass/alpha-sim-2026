@@ -50,30 +50,26 @@ def get_market_data(ticker):
         if data is None or data.empty:
             data = yf.download(ticker, period="2y", interval="1d", progress=False)
             
-        # 🚨 關鍵修復：如果還是空的，直接回傳 None，不要回傳空 DataFrame
+        # 🚨 關鍵修復：如果還是空的，直接回傳 None
         if data is None or data.empty or len(data) == 0:
             return None
         
         # 3. 資料清洗
-        # 處理時區
         if data.index.tz is not None:
             data.index = data.index.tz_localize(None)
             
-        # 處理 MultiIndex (yfinance 0.2.50+ 常見問題)
         if isinstance(data.columns, pd.MultiIndex):
             try:
                 data.columns = data.columns.get_level_values(0)
             except:
                 pass
             
-        # 確保有 Close 欄位
         if 'Close' not in data.columns:
             if 'Adj Close' in data.columns:
                 data['Close'] = data['Adj Close']
             else:
-                return None # 資料結構錯誤
+                return None 
                 
-        # 再次檢查長度
         if len(data) == 0:
             return None
             
@@ -85,7 +81,7 @@ def get_market_data(ticker):
 @st.cache_data(ttl=21600)
 def get_fundamentals_finmind(ticker, token):
     """基本面數據抓取"""
-    # 這裡簡化處理，若無 Token 或非台股直接用 Yahoo
+    # 若無 Token 或非台股直接用 Yahoo
     if not token or ".TW" not in ticker:
         return get_fundamentals_yfinance(ticker)
 
@@ -94,7 +90,6 @@ def get_fundamentals_finmind(ticker, token):
     
     try:
         url = "https://api.finmindtrade.com/api/v4/data"
-        # 嘗試抓取 PE/PB
         params = {
             "dataset": "TaiwanStockPER",
             "data_id": stock_id,
@@ -187,7 +182,6 @@ def get_gemini_decision(ticker, api_key, intel_text, fundamentals):
     (expected_return: range -0.3 to 0.5, vol_multiplier: 0.8 to 2.0)
     """
     
-    # 鎖定 2026 模型
     models = ["gemini-3-flash-preview", "gemini-2.5-flash-preview", "gemini-flash-latest", "gemini-2.0-flash"]
     
     for model_name in models:
@@ -255,12 +249,12 @@ with st.sidebar:
 # --- 5. 主程式 ---
 data = get_market_data(selected_stock)
 
-# 🚨 這裡就是之前報錯的地方，現在加入了嚴格的 None 檢查
+# 🚨 防呆：檢查數據是否存在
 if data is None or data.empty:
     st.error(f"❌ 找不到 {selected_stock} 的資料。")
-    st.warning("解決方案：\n1. 請確認代碼 (如 2330.TW)。\n2. 可能是 Yahoo Finance 暫時阻擋，請稍後再試。")
+    st.warning("解決方案：\n1. 請確認代碼 (如 2330.TW)。\n2. 可能是 Yahoo Finance 暫時阻擋雲端 IP，請稍後再試。\n3. 嘗試輸入美股 (如 NVDA) 測試。")
 else:
-    # 這裡現在安全了，因為前面有擋掉 None
+    # 這裡現在安全了
     last_price = data['Close'].iloc[-1]
     
     # 抓基本面
@@ -280,9 +274,13 @@ else:
         
         c1.metric("PE (本益比)", f"{pe:.1f}x" if pe else "N/A")
         
+        # 🛠️ 這裡修復了語法錯誤
         peg_val = f"{peg:.2f}" if peg else "N/A"
-        peg_color = "normal"
-        if peg: peg_color = "normal" if peg < 1.0 else "inverse" if peg > 2
+        if peg:
+            peg_color = "normal" if peg < 1.0 else ("inverse" if peg > 2.0 else "off")
+        else:
+            peg_color = "off"
+            
         c2.metric("PEG (成長比)", peg_val, delta_color=peg_color)
         
         fcf_val = f"{fcf/1e9:.1f}B" if fcf else "N/A"
@@ -290,6 +288,7 @@ else:
         c4.metric("PB (淨值比)", f"{pb:.1f}x" if pb else "N/A")
         c5.metric("淨利率", f"{margin*100:.1f}%" if margin else "N/A")
 
+    # --- 啟動按鈕邏輯 ---
     if st.button("🚀 啟動雙引擎分析", type="primary"):
         if not pplx_api_key or not google_api_key:
             st.error("❌ 請輸入 API Keys")
@@ -302,7 +301,6 @@ else:
                 
                 # Step 2: AI 決策
                 st.write("🧠 Gemini: 進行多空決策...")
-                # 這裡傳入 fundamentals 讓 AI 參考
                 decision = get_gemini_decision(selected_stock, google_api_key, intel, fundamentals)
                 
                 # 取出參數
