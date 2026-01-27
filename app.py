@@ -314,20 +314,20 @@ else:
                     r1.metric("VaR 95% (最大預期虧損)", f"-{var_95*100:.1f}%", delta_color="inverse")
                     r2.metric("CVaR 95% (尾端條件虧損)", f"-{cvar_95*100:.1f}%", delta_color="inverse")
 
-                # 2. 右側：教授決策報告 (視覺還原重點)
+               # 2. 右側：教授決策報告 (請直接覆蓋原本 col_report 裡的內容)
                 with col_report:
                     st.subheader("📝 教授決策報告")
                     
                     verdict = decision.get("verdict", "HOLD")
                     reasoning = decision.get("reasoning", "")
-                    model_used = decision.get("model_used", "")
+                    model_used = decision.get("model_used", "Unknown Model")
                     
-                    # 計算 R/R
+                    # 計算 R/R (防止除以零)
                     upside = max(p95[-1] - last_price, 0.01)
                     downside = max(last_price - p5[-1], 0.01)
                     rr_ratio = upside / downside
                     
-                    # 決定建議倉位
+                    # 決定建議倉位與顏色
                     if verdict == "BUY":
                         percent = 80 if rr_ratio > 1.5 else 60
                         badge_class = "verdict-buy"
@@ -338,32 +338,37 @@ else:
                         percent = 40
                         badge_class = "verdict-hold"
 
-                    # --- HTML 渲染：還原截圖中的卡片效果 ---
+                    # 防止 AI 回傳的文字裡有大括號 {} 導致 Python f-string 報錯
+                    safe_reasoning = reasoning.replace("{", "(").replace("}", ")").replace("\n", "<br>")
+
+                    # --- HTML 渲染 ---
                     html_content = f"""
                     <div class="report-card">
                         <div style="display: flex; justify-content: space-between; align-items: center;">
                             <span class="verdict-badge {badge_class}">{verdict}</span>
-                            <span style="font-size: 0.9em; color: #94a3b8;">Strategy: {model_used}</span>
+                            <span style="font-size: 0.8em; color: #94a3b8; font-family: monospace;">{model_used}</span>
                         </div>
                         
                         <div style="margin-top: 15px;">
-                            <p style="margin-bottom: 5px; font-weight: bold;">建議倉位: {percent}% (R/R: {rr_ratio:.1f})</p>
-                            <div style="background-color: #334155; border-radius: 5px; height: 10px; width: 100%;">
-                                <div style="background-color: #3b82f6; width: {percent}%; height: 100%; border-radius: 5px;"></div>
+                            <p style="margin-bottom: 5px; font-weight: bold; font-size: 1.1em;">建議倉位: {percent}% <span style="font-size:0.8em; color:#94a3b8;">(R/R: {rr_ratio:.1f})</span></p>
+                            <div style="background-color: #334155; border-radius: 5px; height: 12px; width: 100%;">
+                                <div style="background-color: #3b82f6; width: {percent}%; height: 100%; border-radius: 5px; transition: width 0.5s;"></div>
                             </div>
                         </div>
                         
                         <div class="analysis-box">
-                            <strong>分析邏輯 ({model_used}):</strong><br>
-                            {reasoning.replace(chr(10), '<br>')}
+                            <strong style="color: #60a5fa;">分析邏輯:</strong><br>
+                            <span style="color: #e2e8f0; font-size: 0.95em;">{safe_reasoning}</span>
                         </div>
                         
-                        <div style="margin-top: 15px; font-size: 0.8em; color: #94a3b8;">
-                            AI 已考量 PEG 與現金流數據進行修正。<br>
-                            預期年化報酬: {ai_return*100:.1f}% | 波動: {ai_vol}x
+                        <div style="margin-top: 15px; font-size: 0.8em; color: #94a3b8; border-top: 1px solid #334155; padding-top: 10px;">
+                            ℹ️ AI 已考量 PEG 與現金流數據進行修正。<br>
+                            預期年化報酬: <span style="color: #e2e8f0;">{ai_return*100:.1f}%</span> | 波動: <span style="color: #e2e8f0;">{ai_vol}x</span>
                         </div>
                     </div>
                     """
+                    
+                    # 🔥 關鍵修復：這裡一定要有 unsafe_allow_html=True
                     st.markdown(html_content, unsafe_allow_html=True)
                     
                     with st.expander("📄 原始情報來源"):
