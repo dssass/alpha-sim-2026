@@ -1,4 +1,3 @@
-
 import streamlit as st
 from datetime import date, timedelta
 import yfinance as yf
@@ -179,24 +178,64 @@ def get_fundamentals_yfinance(ticker):
         return {}
 
 def get_perplexity_intel(ticker, api_key):
-    """Perplexity 情報"""
-    if not api_key: return "無 API Key,無法獲取情報。"
+    """Perplexity 情報 (加強版錯誤處理)"""
+    if not api_key: 
+        return {"success": False, "message": "❌ 無 API Key,無法獲取情報。", "data": ""}
+    
     client = OpenAI(api_key=api_key, base_url="https://api.perplexity.ai")
     today_str = date.today().strftime("%Y-%m-%d")
     prompt = f"Search for latest financial news for {ticker} as of {today_str}. Focus on 2026 outlook. Concise."
+    
     try:
         response = client.chat.completions.create(
-            model="sonar-pro", messages=[{"role": "user", "content": prompt}], stream=False
+            model="sonar-pro", 
+            messages=[{"role": "user", "content": prompt}], 
+            stream=False,
+            timeout=30  # 30秒超時
         )
-        return response.choices[0].message.content
+        return {
+            "success": True, 
+            "message": "✅ Perplexity 情報獲取成功", 
+            "data": response.choices[0].message.content
+        }
     except Exception as e:
-        return f"Perplexity Error: {str(e)}"
+        error_str = str(e).lower()
+        
+        # 判斷錯誤類型
+        if "429" in error_str or "rate limit" in error_str:
+            msg = "⚠️ Perplexity 配額已用完 (每日/每分鐘限制)"
+        elif "401" in error_str or "unauthorized" in error_str:
+            msg = "❌ Perplexity API Key 無效或過期"
+        elif "timeout" in error_str:
+            msg = "⏱️ Perplexity 請求超時,請稍後再試"
+        elif "insufficient" in error_str or "quota" in error_str:
+            msg = "💳 Perplexity 帳戶餘額不足"
+        else:
+            msg = f"❌ Perplexity 未知錯誤: {str(e)[:100]}"
+        
+        logging.error(f"Perplexity API Error: {e}")
+        return {"success": False, "message": msg, "data": ""}
 
-def get_gemini_decision(ticker, api_key, intel_text, fundamentals, model_name="gemini-2.0-flash"):
-    """Gemini 決策 - 支援多模型選擇"""
-    if not api_key: return None
+def get_gemini_decision(ticker, api_key, intel_result, fundamentals, model_name="gemini-2.0-flash"):
+    """Gemini 決策 - 支援多模型選擇 (加強版錯誤處理)"""
+    if not api_key: 
+        return {
+            "success": False,
+            "message": "❌ 無 Google API Key",
+            "verdict": "HOLD",
+            "expected_return": 0.05,
+            "volatility_multiplier": 1.0,
+            "reasoning": "缺少 API Key,無法進行 AI 決策",
+            "model_used": "none"
+        }
+    
     genai.configure(api_key=api_key)
     fund_str = json.dumps(fundamentals, indent=2)
+    
+    # 使用情報文字 (如果 Perplexity 失敗則用替代說明)
+    intel_text = intel_result.get("data", "") if isinstance(intel_result, dict) else intel_result
+    if not intel_text:
+        intel_text = "市場情報獲取失敗,僅基於基本面數據進行分析"
     
     prompt = f"""你是專業量化分析師。基於以下資料對 {ticker} 提供決策：
 
@@ -227,14 +266,33 @@ def get_gemini_decision(ticker, api_key, intel_text, fundamentals, model_name="g
         response = model.generate_content(prompt)
         json_str = clean_json_string(response.text)
         decision = json.loads(json_str)
+        decision["success"] = True
+        decision["message"] = f"✅ Gemini ({model_name}) 決策完成"
         return decision
+        
     except Exception as e:
+        error_str = str(e).lower()
+        
+        # 判斷錯誤類型
+        if "429" in error_str or "resource_exhausted" in error_str:
+            msg = "⚠️ Gemini 配額已用完 (每分鐘/每日限制)"
+        elif "quota" in error_str:
+            msg = "💳 Gemini 免費配額已耗盡,請升級方案"
+        elif "api key" in error_str or "invalid" in error_str:
+            msg = "❌ Google API Key 無效或未啟用 Gemini API"
+        elif "not found" in error_str or model_name in error_str:
+            msg = f"❌ 模型 {model_name} 不存在或無權限"
+        else:
+            msg = f"❌ Gemini 未知錯誤: {str(e)[:80]}"
+        
         logging.error(f"Gemini Error with {model_name}: {e}")
         return {
+            "success": False,
+            "message": msg,
             "verdict": "HOLD",
             "expected_return": 0.05,
             "volatility_multiplier": 1.0,
-            "reasoning": f"AI 模型回應異常: {str(e)[:50]}",
+            "reasoning": "AI 模型無法回應,建議檢查 API 配額與金鑰",
             "model_used": "fallback"
         }
 
@@ -294,9 +352,9 @@ with st.sidebar:
     st.divider()
     st.header("🤖 AI 模型設定")
     gemini_models = [
-        "gemini-2.0-flash",
-        "gemini-2.5-flash-preview", 
         "gemini-3-flash-preview",
+        "gemini-2.0-flash",        
+        "gemini-2.5-flash-preview", 
         "gemini-flash-latest"
     ]
     selected_model = st.selectbox("Gemini 模型", gemini_models, index=0)
@@ -348,19 +406,34 @@ else:
             st.error("❌ 請輸入 API Keys")
         else:
             with st.status("正在進行 AI 運算...", expanded=True) as status:
+                # === 階段 1: Perplexity 情報 ===
                 st.write("🌍 Perplexity: 搜集市場情報...")
-                intel = get_perplexity_intel(selected_stock, pplx_api_key)
+                intel_result = get_perplexity_intel(selected_stock, pplx_api_key)
                 
+                # 顯示 Perplexity 狀態
+                if intel_result["success"]:
+                    st.success(intel_result["message"])
+                else:
+                    st.warning(intel_result["message"])
+                    st.info("💡 將繼續使用基本面數據進行分析")
+                
+                # === 階段 2: Gemini 決策 ===
                 st.write("🧠 Gemini: 進行多空決策...")
-                decision = get_gemini_decision(selected_stock, google_api_key, intel, fundamentals, selected_model)
+                decision = get_gemini_decision(selected_stock, google_api_key, intel_result, fundamentals, selected_model)
+                
+                # 顯示 Gemini 狀態
+                if decision.get("success", False):
+                    st.success(decision["message"])
+                else:
+                    st.error(decision["message"])
+                    st.warning("⚠️ 使用預設參數繼續分析")
                 
                 ai_return = decision.get("expected_return", 0.05)
                 ai_vol = decision.get("volatility_multiplier", 1.0)
                 verdict = decision.get("verdict", "HOLD")
                 model_used = decision.get("model_used", "Unknown")
                 
-                st.success(f"決策模型鎖定: {model_used}")
-                
+                # === 階段 3: Monte Carlo 模擬 ===
                 st.write(f"📊 Bootstrap Monte Carlo: 執行 {simulations} 次模擬...")
                 paths = run_bootstrap_monte_carlo(data, days_to_predict, simulations, ai_return, ai_vol)
                 
@@ -520,6 +593,11 @@ else:
                     components.html(html_content, height=450, scrolling=False)
                     
                     with st.expander("📄 原始情報來源"):
-                        st.write(intel)
+                        if isinstance(intel_result, dict) and intel_result.get("data"):
+                            st.write(intel_result["data"])
+                        elif isinstance(intel_result, dict):
+                            st.warning(intel_result.get("message", "無情報資料"))
+                        else:
+                            st.write(intel_result)
     else:
         st.info("👈 準備就緒,請點擊按鈕啟動分析。")
