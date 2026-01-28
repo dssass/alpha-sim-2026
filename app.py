@@ -337,26 +337,59 @@ else:
                 
                 status.update(label="分析完成！", state="complete", expanded=False)
 
-            # --- 結果呈現區 ---
+          # --- 結果呈現區 (請從這裡開始替換) ---
             if paths is not None:
+                # 🛠️ 關鍵修正：先計算數據，確保兩個欄位都能讀取到變數
+                # 將統計計算移出 with col_chart，變成共用變數
+                p5 = np.percentile(paths, 5, axis=1)
+                p50 = np.percentile(paths, 50, axis=1)
+                p95 = np.percentile(paths, 95, axis=1)
+                
                 col_chart, col_report = st.columns([2, 1])
                 
-  # 2. 右側報告 (修復建議倉位顯示)
+                # 1. 左側圖表
+                with col_chart:
+                    st.subheader("🔮 價格路徑模擬")
+                    future_dates = pd.date_range(start=data.index[-1] + timedelta(days=1), periods=days_to_predict)
+                    
+                    fig = go.Figure()
+                    # 顯示歷史數據 (60天)
+                    hist_len = min(60, len(data))
+                    fig.add_trace(go.Scatter(x=data.index[-hist_len:], y=data['Close'][-hist_len:], name='歷史', line=dict(color='gray')))
+                    
+                    fig.add_trace(go.Scatter(x=future_dates, y=p95, mode='lines', line=dict(width=0), showlegend=False))
+                    fig.add_trace(go.Scatter(x=future_dates, y=p5, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 100, 255, 0.2)', name='90% 區間'))
+                    fig.add_trace(go.Scatter(x=future_dates, y=p50, mode='lines', name='AI 中位數', line=dict(color='#3b82f6', width=3)))
+                    fig.update_layout(height=400, margin=dict(l=0, r=0, t=20, b=0))
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("悲觀 (P5)", f"{p5[-1]:.2f}", delta=f"{(p5[-1]/last_price-1)*100:.1f}%", delta_color="inverse")
+                    m2.metric("中位 (P50)", f"{p50[-1]:.2f}", delta=f"{(p50[-1]/last_price-1)*100:.1f}%")
+                    m3.metric("樂觀 (P95)", f"{p95[-1]:.2f}", delta=f"{(p95[-1]/last_price-1)*100:.1f}%")
+                    
+                    # 風險指標
+                    st.subheader("風險指標 (Bootstrap)")
+                    var_95, cvar_95 = calculate_risk_metrics(paths, last_price)
+                    r1, r2 = st.columns(2)
+                    r1.metric("VaR 95% (最大預期虧損)", f"-{var_95*100:.1f}%", delta_color="inverse")
+                    r2.metric("CVaR 95% (極端條件虧損)", f"-{cvar_95*100:.1f}%", delta_color="inverse")
+
+                # 2. 右側報告 (這裡現在可以讀取到 p5 與 p95 了)
                 with col_report:
                     st.subheader("📝 教授決策報告")
                     
-                    # 取得 AI 決策結果，若無則預設 HOLD
-                    verdict = decision.get("verdict", "HOLD").upper() # 強制轉大寫以防萬一
+                    # 取得 AI 決策結果
+                    verdict = decision.get("verdict", "HOLD").upper()
                     reasoning = decision.get("reasoning", "AI 未提供詳細分析。")
                     model_used = decision.get("model_used", "Unknown Model")
                     
-                    # 計算 R/R (風險回報比)
+                    # 計算 R/R (現在這裡不會報錯了)
                     upside = max(p95[-1] - last_price, 0.01)
                     downside = max(last_price - p5[-1], 0.01)
                     rr_ratio = upside / downside
                     
-                    # --- 核心邏輯：計算建議倉位 ---
-                    # 這是您覺得"不見"的部分，其實是透過 Python 規則運算的
+                    # 建議倉位邏輯
                     if "BUY" in verdict:
                         percent = 80 if rr_ratio > 1.5 else 60
                         badge_class = "verdict-buy"
@@ -370,10 +403,10 @@ else:
                         badge_class = "verdict-hold"
                         badge_color = "#f59e0b" # 黃色
 
-                    # 處理文字中的特殊符號，避免 HTML 崩潰
+                    # 處理文字
                     safe_reasoning = reasoning.replace("{", "(").replace("}", ")").replace("\n", "<br>")
 
-                    # --- HTML 卡片渲染 ---
+                    # HTML 樣板
                     html_code = f"""
                     <div class="report-card">
                         <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -381,14 +414,13 @@ else:
                             <span style="font-size: 0.8em; color: #94a3b8; font-family: monospace;">{model_used}</span>
                         </div>
                         
-                        <!-- 建議倉位區塊 (這裡是重點) -->
                         <div style="margin-top: 15px;">
                             <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
                                 <span style="font-weight: bold; font-size: 1.1em;">建議倉位: {percent}%</span>
                                 <span style="font-size: 0.9em; color: #94a3b8;">R/R: {rr_ratio:.1f}</span>
                             </div>
                             <div class="progress-container">
-                                <div style="background-color: #3b82f6; width: {percent}%; height: 100%; border-radius: 5px; transition: width 0.5s;"></div>
+                                <div style="background-color: #3b82f6; width: {percent}%; height: 100%; border-radius: 5px;"></div>
                             </div>
                         </div>
                         
@@ -410,4 +442,3 @@ else:
                         st.write(intel)
     else:
         st.info("👈 準備就緒，請點擊按鈕啟動分析。")
-
